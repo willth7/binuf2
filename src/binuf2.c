@@ -79,6 +79,20 @@ uint64_t str_int_dec(int8_t* a) {
 	}
 }
 
+uint32_t crc_32(uint32_t c, uint32_t b, uint32_t p) {
+	b = b << 24;
+	for (uint8_t i = 8; i; i--) {
+		if ((c ^ b) & 2147483648) {
+			c = ((c & 2147483647) << 1) ^ 79764919;
+		}
+		else {
+			c = ((c & 2147483647) << 1) ^ 0;
+		}
+		b = ((b & 2147483647) << 1);
+	}
+	return c;
+}
+
 uint8_t* bin_read(int8_t* path, uint32_t* bn) {
 	int32_t fd = open(path, O_RDONLY);
 	if (fd == -1) {
@@ -89,31 +103,33 @@ uint8_t* bin_read(int8_t* path, uint32_t* bn) {
 	
 	struct stat fs;
 	fstat(fd, &fs);
-	uint8_t* bin = mmap(0, fs.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	uint8_t* mem = mmap(0, fs.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
 	close (fd);
-	*bn = fs.st_size;
+	
+	*bn = ((fs.st_size / 256) + !!(fs.st_size % 256)) * 256;
+	uint8_t* bin = calloc(256, *bn / 256);
+	memcpy(bin, mem, fs.st_size);
+	
 	return bin;
 }
 
-uint32_t uf2_bin(uint8_t* bin, uint32_t bn, uint32_t addr, struct uf2_s* u) {
-	for (uint32_t i = 0; i * 256 < bn; i++) {
+void uf2_bin(uint8_t* bin, uint32_t bn, uint32_t addr, struct uf2_s* u, uint32_t* un) {
+	uint32_t i;
+	for (i = 0; i * 256 < bn; i++) {
 		u[i].mag0 = mag0;
 		u[i].mag1 = mag1;
 		u[i].magz = magz;
 		u[i].addr = addr + (i * 256);
-		u[i].blki = i;
-		if (bn - (i * 256) > 256) {
-			u[i].bytn = 256;
-			memcpy(u[i].byte, bin + (i * 256), 256);
-		}
-		else {
-			u[i].bytn = bn - (i * 256);
-			memcpy(u[i].byte, bin + (i * 256), bn - (i * 256));
-			for (uint32_t j = 0; j <= i; j++) {
-				u[j].blkn = i + 1;
-			}
-			return i + 1;
-		}
+		u[i].bytn = 256;
+		u[i].blki = i + *un;
+		memcpy(u[i].byte, bin + (i * 256), 256);
+	}
+	*un += i;
+}
+
+void uf2_blck(struct uf2_s* u, uint32_t un) {
+	for (uint32_t i = 0; i < un; i++) {
+		u[i].blkn = un;
 	}
 }
 
@@ -163,6 +179,7 @@ void uf2_help() {
 int8_t main(int32_t argc, int8_t** argv) {
 	if (argc == 1) {
 		uf2_help();
+		return 0;
 	}
 	
 	uint8_t fsz_flag = 0;
@@ -172,6 +189,7 @@ int8_t main(int32_t argc, int8_t** argv) {
 	uint32_t path[256] = {};
 	uint32_t addr[256] = {};
 	uint32_t off[256] = {};
+	uint32_t crc[256] = {};
 	uint32_t in = 0;
 	
 	for (uint32_t i = 1; i < argc - 1; i++) {
@@ -208,6 +226,7 @@ int8_t main(int32_t argc, int8_t** argv) {
 		}
 		else if (!strcmp(argv[i], "--help")) {
 			uf2_help();
+			return 0;
 		}
 		else if (!strcmp(argv[i], "--rpi-pico")) {
 			fmid_flag = 1;
@@ -230,6 +249,7 @@ int8_t main(int32_t argc, int8_t** argv) {
 			}
 			path[in] = i + 1;
 			addr[in] = 268435456;
+			crc[in] = 1;
 			in++;
 			i++;
 		}
@@ -245,8 +265,20 @@ int8_t main(int32_t argc, int8_t** argv) {
 	for (uint32_t i = 0; i < in; i++) {
 		uint32_t bn = 0;
 		uint8_t* bin = bin_read(argv[path[i]], &bn);
-		un += uf2_bin(bin, bn, addr[i] + off[i], u);
-		munmap(bin, bn);
+		if (crc[i]) {
+			for (uint8_t j = 0; j < bn / 256; j++) {
+				uint32_t c = 4294967295;
+				for (uint8_t k = 0; k < 252; k++) {
+					c = crc_32(c, bin[(j * 256) + k], 0);
+				}
+				*(bin + (j * 256) + 252) = c;
+				*(bin + (j * 256) + 253) = c >> 8;
+				*(bin + (j * 256) + 254) = c >> 16;
+				*(bin + (j * 256) + 255) = c >> 24;
+			}
+		}
+		uf2_bin(bin, bn, addr[i] + off[i], u + un, &un);
+		free(bin);
 	}
 	
 	if (fmid_flag) {
@@ -255,7 +287,7 @@ int8_t main(int32_t argc, int8_t** argv) {
 	else if (fsz_flag) {
 		uf2_fsz(u, un);
 	}
-	
+	uf2_blck(u, un);
 	uf2_writ(u, un, argv[argc - 1]);
 	
 	free(u);
